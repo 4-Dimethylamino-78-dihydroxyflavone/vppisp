@@ -92,7 +92,7 @@ fn run() -> Result<(), String> {
 
     let (xyz, rgb) = io::read_ply(&a.recon.join("scene.ply"))?;
     let (obs, n_pts) = fit::correspond(&mut engine, &xyz, &rgb, &cams, &geo, &ims, &dims, a.points);
-    drop((xyz, rgb, ims));
+    drop((xyz, rgb));
     if n_pts < 1000 {
         return Err(format!("only {n_pts} points are seen by 3+ frames; is --recon the right reconstruction?"));
     }
@@ -105,6 +105,16 @@ fn run() -> Result<(), String> {
         255.0 * rep.after,
         t.elapsed().as_secs_f32()
     );
+    // The set's white point at the reference exposure: the brightest 0.5% of
+    // radiance any frame recorded. The output shoulder maps it to 1.0, so a
+    // frame lifted several stops rolls its highlights off instead of clipping
+    // (a doorway frame metered for outdoors: 50% clipped without it).
+    let lw = white_point(&ims, &dims, &model, a.vignette);
+    let shoulder = isp::shoulder_for(lw, KNEE);
+    drop(ims);
+    if shoulder.1 > 0.0 {
+        eprintln!("[vppisp] highlights: white point {lw:.2}x full scale, rolled off above {KNEE} linear");
+    }
 
     let out = a.out.clone().unwrap_or_else(|| io::sibling(&a.input, "_ppisp"));
     std::fs::create_dir_all(&out).map_err(|e| format!("{}: {e}", out.display()))?;
@@ -124,7 +134,7 @@ fn run() -> Result<(), String> {
         images.par_iter().enumerate().try_for_each(|(f, p)| -> Result<(), String> {
             let img = image::DynamicImage::ImageRgb8(io::decode_full(p)?).into_rgba8();
             let (w, h) = img.dimensions();
-            let px = engine.lock().map_err(|e| e.to_string())?.correct(img.as_raw(), w, h, &model.frames[f], &model.cam, a.vignette, &luts);
+            let px = engine.lock().map_err(|e| e.to_string())?.correct(img.as_raw(), w, h, &model.frames[f], &model.cam, a.vignette, &luts, shoulder);
             drop(img);
             let mut name = p.file_stem().unwrap_or_default().to_os_string();
             name.push(".jpg");
@@ -136,16 +146,47 @@ fn run() -> Result<(), String> {
     })?;
 
     // Input order, so a list input keeps it: reconstruct from <out>/images.txt.
-    let list: String = images.iter().map(|p| format!("{}.jpg
-", p.file_stem().unwrap_or_default().to_string_lossy())).collect();
+    let list: String = images.iter().map(|p| format!("{}.jpg\n", p.file_stem().unwrap_or_default().to_string_lossy())).collect();
     std::fs::write(out.join("images.txt"), list).map_err(|e| e.to_string())?;
-    std::fs::write(out.join("ppisp.json"), report(&images, &raw_ev, &model, &rep, a.vignette))
+    std::fs::write(out.join("ppisp.json"), report(&images, &raw_ev, &model, &rep, a.vignette, lw))
         .map_err(|e| e.to_string())?;
     eprintln!("[vppisp] wrote {} images to {} ({:.1}s)", images.len(), out.display(), t.elapsed().as_secs_f32());
     Ok(())
 }
 
-fn report(images: &[PathBuf], ev: &[Option<f64>], m: &fit::Model, r: &fit::Report, vignette: bool) -> String {
+/// Linear level above which the reference rendering rolls highlights off.
+/// ~0.8 in display terms: mid-tones are untouched.
+const KNEE: f64 = 0.6;
+
+/// Max over frames of the 99.5th-percentile radiance (brightest channel) at
+/// the reference exposure, from the working-resolution frames; at least 1.
+fn white_point(ims: &[image::RgbImage], dims: &[(u32, u32)], m: &fit::Model, vignette: bool) -> f64 {
+    let inv: Vec<[f64; 256]> = (0..3).map(|k| std::array::from_fn(|v| isp::crf_inv(&m.cam, k, v as f64 / 255.0))).collect();
+    ims.par_iter()
+        .zip(dims)
+        .zip(&m.frames)
+        .map(|((im, &(sw, sh)), f)| {
+            let hi = isp::invert(&isp::homography(&f[1..]));
+            let gain = (-f[0]).exp2();
+            let (w, h, mx) = (im.width() as f64, im.height() as f64, sw.max(sh) as f64);
+            let mut v: Vec<f64> = im
+                .enumerate_pixels()
+                .filter(|(x, y, _)| x % 2 == 0 && y % 2 == 0)
+                .map(|(x, y, p)| {
+                    let c = isp::apply_cc(&hi, [inv[0][p[0] as usize], inv[1][p[1] as usize], inv[2][p[2] as usize]]);
+                    let uv = [((x as f64 + 0.5) / w - 0.5) * sw as f64 / mx, ((y as f64 + 0.5) / h - 0.5) * sh as f64 / mx];
+                    (0..3)
+                        .map(|k| c[k] * gain / if vignette { isp::vignette(&m.cam, k, uv).max(0.2) } else { 1.0 })
+                        .fold(0.0, f64::max)
+                })
+                .collect();
+            v.sort_by(f64::total_cmp);
+            v[((v.len() as f64 * 0.995) as usize).min(v.len() - 1)]
+        })
+        .reduce(|| 1.0, f64::max)
+}
+
+fn report(images: &[PathBuf], ev: &[Option<f64>], m: &fit::Model, r: &fit::Report, vignette: bool, lw: f64) -> String {
     let nums = |v: &[f64]| v.iter().map(|x| format!("{x:.6}")).collect::<Vec<_>>().join(", ");
     let frames: Vec<String> = images
         .iter()
@@ -158,7 +199,7 @@ fn report(images: &[PathBuf], ev: &[Option<f64>], m: &fit::Model, r: &fit::Repor
         })
         .collect();
     format!(
-        "{{\n  \"model\": \"PPISP (Deutsch et al. 2026), fitted on point correspondences\",\n  \"vignette\": {vignette},\n  \
+        "{{\n  \"model\": \"PPISP (Deutsch et al. 2026), fitted on point correspondences\",\n  \"vignette\": {vignette}, \"white_point\": {lw:.4}, \"knee\": {KNEE},\n  \
          \"points\": {}, \"observations\": {},\n  \"error_before\": {:.6}, \"error_after\": {:.6},\n  \
          \"camera\": {{\"vignetting\": [{}], \"crf_raw\": [{}]}},\n  \"frames\": [\n{}\n  ]\n}}\n",
         r.points,

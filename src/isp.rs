@@ -199,3 +199,18 @@ pub fn inverse(cam: &[f64], dt: f64, hi: &[[f64; 3]; 3], uv: [f64; 2], px: [f64;
     let e = (-dt).exp2();
     [0, 1, 2].map(|k| x[k] * e / vignette(cam, k, uv).max(0.2))
 }
+
+/// The highlight shoulder of the reference rendering: identity up to `knee`
+/// (linear), then a C1 rational roll-off reaching 1.0 at the set's white
+/// point, instead of a hard clip. One curve for every frame, so frames stay
+/// consistent; a frame lifted several stops keeps texture in its highlights.
+/// `(knee, b)` from `shoulder_for`; b = 0 is the identity.
+#[inline]
+pub fn shoulder(x: f64, (knee, b): (f64, f64)) -> f64 {
+    if x > knee { knee + (x - knee) / (1.0 + (x - knee) * b) } else { x }
+}
+
+/// Shoulder parameters mapping white point `lw` to exactly 1.0.
+pub fn shoulder_for(lw: f64, knee: f64) -> (f64, f64) {
+    if lw <= 1.0 { (knee, 0.0) } else { (knee, (lw - 1.0) / ((1.0 - knee) * (lw - knee))) }
+}

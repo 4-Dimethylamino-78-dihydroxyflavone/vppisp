@@ -131,11 +131,11 @@ impl Engine {
 
     /// Frame `f`'s correction of a packed RGBA image (alpha passes through).
     #[allow(clippy::too_many_arguments)]
-    pub fn correct(&mut self, rgba: &[u8], w: u32, h: u32, frame: &[f64; 9], cam: &[f64; 27], vignette: bool, luts: &[f32]) -> Vec<u8> {
+    pub fn correct(&mut self, rgba: &[u8], w: u32, h: u32, frame: &[f64; 9], cam: &[f64; 27], vignette: bool, luts: &[f32], shoulder: (f64, f64)) -> Vec<u8> {
         let hi = isp::invert(&isp::homography(&frame[1..]));
         let gain = (-frame[0]).exp2();
         if let Engine::Gpu(g) = self {
-            return g.correct(rgba, w, h, &hi, gain, cam, vignette, luts);
+            return g.correct(rgba, w, h, &hi, gain, cam, vignette, luts, shoulder);
         }
         let (w, h) = (w as usize, h as usize);
         let mx = w.max(h) as f64;
@@ -155,7 +155,7 @@ impl Engine {
                 let uv = [(x as f64 + 0.5 - w as f64 / 2.0) / mx, v];
                 for k in 0..3 {
                     let vg = if vignette { isp::vignette(cam, k, uv).max(0.2) } else { 1.0 };
-                    dst[4 * x + k] = (255.0 * lut(k, c[k] * gain / vg).clamp(0.0, 1.0) + 0.5) as u8;
+                    dst[4 * x + k] = (255.0 * lut(k, isp::shoulder(c[k] * gain / vg, shoulder)).clamp(0.0, 1.0) + 0.5) as u8;
                 }
                 dst[4 * x + 3] = 255;
             }

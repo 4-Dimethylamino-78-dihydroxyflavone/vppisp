@@ -250,6 +250,7 @@ struct CU {
     w: u32,
     h: u32,
     vig: u32,
+    shoulder: vec4<f32>,   // knee, b, -, - (see isp::shoulder)
 }
 
 @group(0) @binding(20) var<storage, read> src: array<u32>;
@@ -272,7 +273,9 @@ fn correct(@builtin(global_invocation_id) g: vec3<u32>) {
     for (var k = 0u; k < 3u; k++) {
         var v = 1.0;
         if (cu.vig != 0u) { v = max(vig(cam, k, uv), 0.2); }
-        let x = clamp(c[k] * cu.gain / v, 0.0, 1.0) * 4096.0;
+        var r = c[k] * cu.gain / v;
+        if (r > cu.shoulder.x) { r = cu.shoulder.x + (r - cu.shoulder.x) / (1.0 + (r - cu.shoulder.x) * cu.shoulder.y); }
+        let x = clamp(r, 0.0, 1.0) * 4096.0;
         let j = min(u32(x), 4095u);
         let b = 768u + k * 4097u;
         let y = mix(luts[b + j], luts[b + j + 1u], x - f32(j));

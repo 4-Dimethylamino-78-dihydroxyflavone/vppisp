@@ -265,19 +265,19 @@ impl Gpu {
     }
 
     /// One frame's correction over a packed RGBA image.
-    pub fn correct(&mut self, rgba: &[u8], w: u32, h: u32, hi: &[[f64; 3]; 3], gain: f64, cam: &[f64; 27], vignette: bool, luts: &[f32]) -> Vec<u8> {
+    pub fn correct(&mut self, rgba: &[u8], w: u32, h: u32, hi: &[[f64; 3]; 3], gain: f64, cam: &[f64; 27], vignette: bool, luts: &[f32], shoulder: (f64, f64)) -> Vec<u8> {
         let len = rgba.len() as u64;
         if self.img.as_ref().is_none_or(|b| b.len != len) {
             let src = self.empty(len, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST);
             let dst = self.empty(len, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC);
             let lb = self.empty((luts.len() * 4) as u64, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST);
-            let uni = self.empty(176, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST);
+            let uni = self.empty(192, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST);
             let readback = self.empty(len, wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST);
             let bind = self.bind(&self.correct, &[(20, &src), (21, &dst), (22, &lb), (23, &uni)]);
             self.img = Some(ImgBufs { len, src, dst, luts: lb, uni, readback, bind });
         }
         let b = self.img.as_ref().expect("just made");
-        let mut u = [0u32; 44];
+        let mut u = [0u32; 48];
         for r in 0..3 {
             for c in 0..3 {
                 u[4 * r + c] = (hi[r][c] as f32).to_bits();
@@ -290,6 +290,8 @@ impl Gpu {
         u[41] = w;
         u[42] = h;
         u[43] = vignette as u32;
+        u[44] = (shoulder.0 as f32).to_bits();
+        u[45] = (shoulder.1 as f32).to_bits();
         self.queue.write_buffer(&b.uni, 0, bytemuck::cast_slice(&u));
         self.queue.write_buffer(&b.luts, 0, f32s(luts));
         self.queue.write_buffer(&b.src, 0, rgba);
