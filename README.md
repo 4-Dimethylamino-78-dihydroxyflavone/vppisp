@@ -75,6 +75,21 @@ Vignetting stays at identity, because Nikon corrects it in-camera and PPISP's
 priors decline to invent it. Lifting an underexposed 8-bit JPEG clips its
 brightest whites. RAW input would avoid that.
 
+## Highlights: the shoulder
+
+Re-rendering every frame at one exposure lifts the frames the camera
+under-exposed, and an 8-bit JPEG has nothing above 255 to lift. On the indoor
+set, doorway views metered for the bright outdoors came out ~50% pure white,
+and dvlt scattered those featureless regions into a fan of points. So the
+reference rendering ends in a global shoulder instead of a clip: identity up
+to 0.6 linear (~0.8 display), then a C1 rational roll-off that maps the set's
+white point to 1.0. The white point is the largest per-frame 99.5th-percentile
+radiance at the reference exposure; it was 20× full scale indoors and 3.75×
+outdoors. The curve is the same for every frame, so cross-frame consistency
+holds. `white_point` and `knee` are recorded in ppisp.json. Indoors: clipped
+pixels 9.5% → 0.1% (raw frames: 0.9%), frames more than 5% clipped 21 → 0,
+doorway views 50% → 0%.
+
 ## Outputs
 
 `<out>/<stem>.jpg`: upright, q95, no EXIF; `<out>/images.txt`: input order;
